@@ -2,6 +2,9 @@ import fitz  # PyMuPDF
 import pandas as pd
 import re
 import os
+from pyzbar.pyzbar import decode
+from PIL import Image
+import io
 
 def extract_name_and_passkey_improved(page):
     """
@@ -68,6 +71,53 @@ def extract_name_and_passkey_improved(page):
 
     return name, passkey
 
+def extract_qr_hash(page):
+    """
+    Extract QR code hash from the verification URL on the page
+    Expects URL format: registrar.earist.edu.ph/verify/{hash}
+    Returns only the hash part or empty string if not found
+    """
+    try:
+        # Render page as image with higher resolution for better QR detection
+        zoom = 3  # Increase for better QR detection
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+        # Get page dimensions
+        width, height = img.size
+
+        # Crop bottom right area where QR code is typically located
+        # Adjust these values if QR code is in different position
+        left = int(width * 0.7)    # Right 30% of page
+        top = int(height * 0.75)   # Bottom 25% of page
+        right = width
+        bottom = height
+        qr_area = img.crop((left, top, right, bottom))
+
+        # Decode QR code
+        decoded_objs = decode(qr_area)
+        for obj in decoded_objs:
+            qr_data = obj.data.decode("utf-8")
+
+            # Extract hash from the verification URL
+            # Pattern: registrar.earist.edu.ph/verify/{hash}
+            hash_pattern = r'registrar\.earist\.edu\.ph/verify/([A-Za-z0-9]+)'
+            match = re.search(hash_pattern, qr_data)
+
+            if match:
+                return match.group(1)  # Return just the hash part
+            else:
+                # If pattern doesn't match, try to extract anything after the last slash
+                parts = qr_data.split('/')
+                if len(parts) > 0:
+                    return parts[-1]  # Return last part of URL
+
+    except Exception as e:
+        print(f"Error extracting QR code: {e}")
+
+    return ""  # Return empty string if no QR code found or error occurred
+
 def preview_page_text(pdf_path, page_num=0):
     """
     Preview text extraction for a specific page to help with debugging
@@ -105,8 +155,10 @@ def preview_page_text(pdf_path, page_num=0):
 
     # Test extraction
     name, passkey = extract_name_and_passkey_improved(page)
+    qr_hash = extract_qr_hash(page)
     print(f"\nExtracted Name: '{name}'")
     print(f"Extracted Passkey: '{passkey}'")
+    print(f"Extracted QR Hash: '{qr_hash}'")
 
     doc.close()
 
@@ -138,16 +190,19 @@ def scan_pdf_batch(pdf_path, output_excel_path, start_page=0, end_page=None):
 
         page = doc[page_num]
         name, passkey = extract_name_and_passkey_improved(page)
+        qr_hash = extract_qr_hash(page)
 
         result = {
             'Page': page_num + 1,
             'Name': name,
-            'Passkey': passkey
+            'Passkey': passkey,
+            'Hash': qr_hash
         }
         results.append(result)
 
         print(f"  Name: {name}")
         print(f"  Passkey: {passkey}")
+        print(f"  Hash: {qr_hash}")
 
     doc.close()
 
@@ -163,7 +218,8 @@ def scan_pdf_batch(pdf_path, output_excel_path, start_page=0, end_page=None):
     # Display summary
     valid_names = df[df['Name'] != ''].shape[0]
     valid_passkeys = df[df['Passkey'] != ''].shape[0]
-    print(f"Successfully extracted {valid_names} names and {valid_passkeys} passkeys")
+    valid_hashes = df[df['Hash'] != ''].shape[0]
+    print(f"Successfully extracted {valid_names} names, {valid_passkeys} passkeys, and {valid_hashes} QR hashes")
 
     return df
 
@@ -172,7 +228,7 @@ def main():
     Main function with interactive options
     """
     # Configuration - UPDATE THESE PATHS
-    pdf_path = "BSHM.pdf"  
+    pdf_path = "BSHM.pdf"
     output_excel_path = "extracted_names_passkeys.xlsx"
 
     print("PDF Name and Passkey Scanner")
